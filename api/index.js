@@ -18,11 +18,16 @@ const app = express();
 // =============================================
 app.use(helmet());
 
-// CORS: allow local dev ports (Vite default 5173) and optional FRONTEND_URL
+// CORS: allow configured FRONTEND_URL and local dev ports
 const allowedOrigins = [];
-if (process.env.FRONTEND_URL) allowedOrigins.push(process.env.FRONTEND_URL);
+if (process.env.FRONTEND_URL) {
+  const frontendUrl = process.env.FRONTEND_URL.replace(/\/$/, ''); // Remove trailing slash
+  allowedOrigins.push(frontendUrl);
+}
 // Common local dev ports: 3000 (CRA), 5173 (Vite)
 allowedOrigins.push("http://localhost:3000", "http://localhost:5173");
+
+console.log("[CORS] Allowed Origins:", allowedOrigins);
 
 app.use(
   cors({
