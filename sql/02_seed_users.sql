@@ -1,0 +1,205 @@
+-- ============================================
+-- SEED DATA - Default Admin User Only
+-- ============================================
+-- 
+-- PENTING: Gunakan script ini HANYA untuk testing/development!
+-- Untuk production, gunakan API /auth/register endpoint dengan admin account
+--
+-- ============================================
+
+-- CATATAN: Password dibawah adalah SAMPLE ONLY
+-- Jangan simpan password plain-text di database!
+-- Supabase Auth akan handle hashing automatically.
+-- Script ini hanya untuk reference struktur data.
+
+-- ============================================
+-- USER CREDENTIALS (Reference Only)
+-- ============================================
+-- 
+-- ADMIN:
+--   Username: admin
+--   Password: Admin@123456
+--   Role: admin
+--   Akses: SEMUA menu
+--
+-- STAFF: User baru bisa ditambah via API oleh admin
+--
+-- ============================================
+
+-- INSERT akan dilakukan via API register endpoint
+-- API akan handling password hashing dan Supabase Auth creation
+
+-- Berikut adalah PREVIEW struktur data yang akan disimpan:
+
+/*
+-- ADMIN USER (setelah create via API)
+INSERT INTO users (id, username, nama, role, is_active)
+VALUES (
+    '00000000-0000-0000-0000-000000000001',  -- UUID dari Supabase Auth
+    'admin',
+    'Administrator',
+    'admin',
+    true
+);
+*/
+
+-- ============================================
+-- SETUP INSTRUCTIONS
+-- ============================================
+-- 
+-- 1. JALANKAN: 01_create_users_table.sql
+--    Ini membuat structure tabel users di Supabase
+--
+-- 2. SETUP SUPABASE AUTH:
+--    - Go to Supabase Dashboard → Authentication → Providers
+--    - Enable "Email / Password"
+--
+-- 3. CREATE FIRST ADMIN (via SQL - Manual Bootstrap):
+--
+--    Gunakan Supabase Dashboard → SQL Editor
+--    Jalankan SEMUA query berikut dalam sequence:
+--
+--    STEP 1: Buat auth user dengan password encrypted (bcrypt)
+--    -------
+--    INSERT INTO auth.users (id, email, encrypted_password, email_confirmed_at, created_at, updated_at)
+--    VALUES (
+--      gen_random_uuid(),
+--      'admin@croscek.internal',
+--      crypt('Admin@123456', gen_salt('bf')),
+--      NOW(),
+--      NOW(),
+--      NOW()
+--    ) RETURNING id;
+--
+--    ⚠️ COPY UUID hasil query di atas!
+--
+--
+--    STEP 2: Insert ke tabel users dengan password_hash encrypted juga
+--    -------
+--    INSERT INTO users (id, username, nama, role, password_hash, is_active)
+--    VALUES (
+--      'PASTE_UUID_DARI_STEP_1_DI_SINI',
+--      'admin',
+--      'Administrator',
+--      'admin',
+--      crypt('Admin@123456', gen_salt('bf')),
+--      true
+--    );
+--
+--    ✅ Now admin user created with encrypted password di BOTH:
+--       - auth.users (Supabase Auth)
+--       - users (Application table)
+--
+--
+--    STEP 3: Verify user created
+--    -------
+--    SELECT id, username, nama, role, is_active FROM users WHERE username = 'admin';
+--
+--
+-- 4. TESTING LOGIN:
+--    Username: admin
+--    Password: Admin@123456
+--
+-- ============================================
+-- INSERT MULTIPLE USERS EXAMPLE
+-- ============================================
+--
+-- Untuk insert multiple users sekaligus, gunakan transaction:
+--
+-- BEGIN;
+--
+-- -- Admin 1
+-- INSERT INTO auth.users (id, email, encrypted_password, email_confirmed_at, created_at, updated_at)
+-- VALUES (gen_random_uuid(), 'admin1@croscek.internal', crypt('Admin@123456', gen_salt('bf')), NOW(), NOW(), NOW())
+-- RETURNING id AS admin1_id;
+--
+-- -- Admin 1 di users table
+-- INSERT INTO users (id, username, nama, role, password_hash, is_active)
+-- VALUES ('COPY_ID_DARI_ATAS', 'admin', 'Administrator', 'admin', crypt('Admin@123456', gen_salt('bf')), true);
+--
+-- COMMIT;
+--
+-- ============================================
+-- PASSWORD ENCRYPTION REFERENCE
+-- ============================================
+--
+-- PostgreSQL bcrypt hashing:
+--   crypt('password', gen_salt('bf'))
+--
+-- Contoh untuk berbagai password:
+--
+--   Admin@123456:
+--   crypt('Admin@123456', gen_salt('bf'))
+--
+--   Staff#2024Pass:
+--   crypt('Staff#2024Pass', gen_salt('bf'))
+--
+-- Verify password:
+--   SELECT crypt('Admin@123456', password_hash) = password_hash FROM users WHERE username = 'admin';
+--   Result: true = password benar
+--
+-- ============================================
+-- CREATE STAFF USER VIA API
+-- ============================================
+--
+-- Setelah admin created, bisa create staff via API:
+--
+-- curl -X POST http://localhost:5000/api/auth/register \
+--   -H "Content-Type: application/json" \
+--   -H "Authorization: Bearer ADMIN_JWT_TOKEN" \
+--   -d '{
+--     "username": "staff1",
+--     "password": "Staff@123456",
+--     "nama": "Staff User 1",
+--     "role": "staff"
+--   }'
+--
+-- API akan handle password encryption ke BOTH tables otomatis
+--
+-- ============================================
+-- TESTING LOGINS
+-- ============================================
+--
+-- Test Admin Login:
+-- curl -X POST http://localhost:5000/api/auth/login \
+--   -H "Content-Type: application/json" \
+--   -d '{
+--     "username": "admin",
+--     "password": "Admin@123456"
+--   }'
+--
+-- Response:
+-- {
+--   "message": "Login berhasil",
+--   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+--   "user": {
+--     "id": "uuid...",
+--     "username": "admin",
+--     "nama": "Administrator",
+--     "role": "admin"
+--   }
+-- }
+--
+-- Gunakan token untuk API calls:
+-- curl -H "Authorization: Bearer TOKEN" \
+--   http://localhost:5000/api/auth/me
+--
+-- ============================================
+-- PASSWORD POLICY
+-- ============================================
+-- 
+-- Requirements:
+--   ✅ Min 8 characters
+--   ✅ Must contain: uppercase, lowercase, number, special char
+--
+-- Valid:
+--   ✅ Admin@123456
+--   ✅ Staff#2024Pass
+--   ✅ MyPass$2024!
+--
+-- Invalid:
+--   ❌ admin123 (no uppercase, no special)
+--   ❌ ADMIN123 (no lowercase)
+--   ❌ pass (too short)
+--
+-- ============================================
