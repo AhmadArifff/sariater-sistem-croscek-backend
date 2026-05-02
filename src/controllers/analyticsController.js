@@ -1022,6 +1022,9 @@ export async function getCroscekDelays(req, res) {
  * GET /api/analytics/attendance-rate
  * Attendance rate (%) with breakdown: Present, Late, Absent
  * Query: ?filterType=today|range|month&startDate=2026-04-01&endDate=2026-04-15&month=2026-04
+ * 
+ * FIX: Use same isLateArrival() logic as getTopLatecomers to correctly identify late arrivals
+ * instead of just checking if Status_Kehadiran contains 'terlambat'
  */
 export async function getAttendanceRate(req, res) {
   try {
@@ -1043,30 +1046,35 @@ export async function getAttendanceRate(req, res) {
     }
 
     // Fetch from croscek table (processed attendance data)
+    // Need to fetch ALL fields to use isLateArrival() function properly
     let query = supabase
       .from('croscek')
-      .select('"Nama", "Departemen", "Status_Kehadiran", "Status_Masuk"')
+      .select('*')
       .gte('"Tanggal"', dateStart)
       .lte('"Tanggal"', dateEnd);
 
     let croscekData = await fetchAllRows(query);
 
-    // Count by status
+    // Count by status using same logic as getTopLatecomers
     let present = 0;
     let late = 0;
     let absent = 0;
     const uniqueEmployees = new Set();
 
     croscekData.forEach(record => {
-      const status = (record.Status_Kehadiran || '').toLowerCase();
+      const status = (record.Status_Kehadiran || '').toUpperCase().trim();
       
       uniqueEmployees.add(record.Nama);
       
-      if (status.includes('hadir')) {
-        present++;
-      } else if (status.includes('terlambat')) {
+      // Use isLateArrival() function to properly detect late arrivals
+      // This function checks:
+      // 1. Status_Masuk field for TL code (priority)
+      // 2. Actual vs scheduled check-in time (fallback)
+      if (isLateArrival(record)) {
         late++;
-      } else if (status.includes('sakit') || status.includes('izin') || status.includes('cuti') || status.includes('absen')) {
+      } else if (status === 'HADIR') {
+        present++;
+      } else if (status.includes('SAKIT') || status.includes('IZIN') || status.includes('CUTI') || status.includes('ALPA') || status.includes('TIDAK HADIR')) {
         absent++;
       }
     });
@@ -1744,7 +1752,6 @@ export async function getDebugCroscekSample(req, res) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 }
-
 
 
 

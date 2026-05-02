@@ -44,6 +44,8 @@ import {
   getRekapHOD,
   refreshMaterializedView,
   recreateMaterializedView,
+  clearCroscekKaryawan,
+  clearCroscekDW,
 } from "../controllers/croscekController.js";
 
 const router = express.Router();
@@ -103,10 +105,12 @@ router.post("/croscek-karyawan/sql/recreate", recreateMaterializedView);
 router.get("/croscek-karyawan/diagnostics",  getCroscekDiagnostics);
 router.get("/croscek-karyawan/coverage", getJadwalCoverage);
 router.post("/croscek-karyawan",              saveCroscekKaryawan);
+router.post("/croscek-karyawan/clear",        clearCroscekKaryawan);
 router.get("/croscek-karyawan/final",         getCroscekKaryawanFinal);
 
 router.get("/croscek-dw",                     getCroscekDW);
 router.post("/croscek-dw",                    saveCroscekDW);
+router.post("/croscek-dw/clear",              clearCroscekDW);
 router.get("/croscek-dw/final",               getCroscekDWFinal);
 
 // =============================================

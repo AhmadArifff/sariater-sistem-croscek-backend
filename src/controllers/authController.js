@@ -363,7 +363,7 @@ export async function getUsers(req, res) {
 }
 
 // =============================================
-// PUT /api/auth/users/:id/toggle  (Admin: aktif/nonaktif user)
+// PUT /api/auth/users/:id/toggle-active  (Admin: aktif/nonaktif user)
 // =============================================
 export async function toggleUserActive(req, res) {
   try {

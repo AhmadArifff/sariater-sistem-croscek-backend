@@ -2679,3 +2679,51 @@ export async function getJadwalCoverage(req, res) {
     return res.status(500).json({ error: e.message });
   }
 }
+
+// POST /api/croscek-karyawan/clear
+// Truncate seluruh tabel croscek (untuk kategori karyawan)
+export async function clearCroscekKaryawan(req, res) {
+  try {
+    console.log("🧹 POST /api/croscek-karyawan/clear - Truncating croscek table");
+    
+    const { error } = await supabase
+      .from("croscek")
+      .delete()
+      .gte("id_karyawan", 0); // Delete semua records
+    
+    if (error) throw error;
+    
+    console.log("✅ Croscek table successfully truncated");
+    return res.json({ 
+      success: true, 
+      message: "✅ Semua data croscek berhasil dihapus!"
+    });
+  } catch (e) {
+    console.error("❌ clearCroscekKaryawan:", e);
+    return res.status(500).json({ error: e.message });
+  }
+}
+
+// POST /api/croscek-dw/clear
+// Truncate seluruh tabel croscek_dw (untuk kategori dw)
+export async function clearCroscekDW(req, res) {
+  try {
+    console.log("🧹 POST /api/croscek-dw/clear - Truncating croscek_dw table");
+    
+    const { error } = await supabase
+      .from("croscek_dw")
+      .delete()
+      .gte("id_karyawan", 0); // Delete semua records
+    
+    if (error) throw error;
+    
+    console.log("✅ Croscek_dw table successfully truncated");
+    return res.json({ 
+      success: true, 
+      message: "✅ Semua data croscek DW berhasil dihapus!"
+    });
+  } catch (e) {
+    console.error("❌ clearCroscekDW:", e);
+    return res.status(500).json({ error: e.message });
+  }
+}

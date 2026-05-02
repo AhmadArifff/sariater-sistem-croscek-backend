@@ -21,7 +21,8 @@ router.post("/register",         ...adminOnly, registerUser);
 router.post("/users",            ...adminOnly, registerUser);  // Create new user (alias for /register)
 router.get("/me",                authenticate, getMe);
 router.get("/users",             ...adminOnly, getUsers);
-router.put("/users/:id/toggle",  ...adminOnly, toggleUserActive);
+router.put("/users/:id/toggle-active", ...adminOnly, toggleUserActive);
+router.put("/users/:id/toggle",        ...adminOnly, toggleUserActive); // Backward compatibility
 router.put("/users/:id",         ...adminOnly, updateUser);      // Update user (nama, role, password)
 router.delete("/users/:id",      ...adminOnly, deleteUser);      // Delete user
 
