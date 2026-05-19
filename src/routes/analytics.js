@@ -96,5 +96,11 @@ router.get('/employee/:id_karyawan', authenticate, getEmployeeDetail);
 
 // DEBUG endpoint - sample data
 router.get('/debug/sample', getDebugCroscekSample);
-
+router.get('/analytics/ping', (req, res) => {
+  res.json({ 
+    version: 'v2-croscek',
+    timestamp: new Date().toISOString(),
+    query: req.query 
+  });
+});
 export default router;

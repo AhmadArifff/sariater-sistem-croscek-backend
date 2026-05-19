@@ -163,14 +163,29 @@ function getCheckOutIndicator(record) {
   return 'anomaly';
 }
 
+
 /**
  * GET /api/analytics/summary
  * Daily attendance summary with optional date range filter
  * Query: ?startDate=2026-04-01&endDate=2026-04-15&month=2026-04&filterType=today|range|month
  */
+/**
+ * GET /api/analytics/summary
+ * Daily attendance summary — menggunakan croscek (konsisten dengan attendance-rate)
+ */
 export async function getSummary(req, res) {
   try {
     const { startDate, endDate, month, filterType = 'today' } = req.query;
+
+    // ============================================================
+    // Helper format date lokal (hindari timezone shift)
+    // ============================================================
+    function formatDateLocalSummary(date) {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
 
     const OFF_SHIFT = new Set(['X', 'CT', 'CTT', 'CTB', 'EO', 'OF1']);
 
@@ -178,50 +193,41 @@ export async function getSummary(req, res) {
 
     if (filterType === 'month' && month) {
       const [y, mo] = month.split('-').map(Number);
-      dateStart = formatDateLocal(new Date(y, mo - 1, 1));
-      dateEnd   = formatDateLocal(new Date(y, mo, 0));
+      dateStart = formatDateLocalSummary(new Date(y, mo - 1, 1));
+      dateEnd   = formatDateLocalSummary(new Date(y, mo, 0));
     } else if (filterType === 'range' && startDate && endDate) {
       dateStart = startDate;
       dateEnd   = endDate;
     } else {
-      dateStart = formatDateLocal(new Date());
-      dateEnd   = dateStart;
+      const today = formatDateLocalSummary(new Date());
+      dateStart = today;
+      dateEnd   = today;
     }
 
-    console.log(`[SUMMARY] filterType=${filterType} dateStart=${dateStart} dateEnd=${dateEnd}`);
+    // ============================================================
+    // Fetch dari croscek (sama dengan attendance-rate & top-latecomers)
+    // ============================================================
+    let croscekQuery = supabase
+      .from('croscek')
+      .select(
+        '"id_karyawan", "Nama", "Kode_Shift", "Status_Kehadiran", "Status_Masuk", ' +
+        '"Jadwal_Masuk", "Jadwal_Pulang", "Actual_Masuk", "Actual_Pulang"'
+      )
+      .gte('"Tanggal"', dateStart)
+      .lte('"Tanggal"', dateEnd);
 
-    // ============================================================
-    // FETCH DARI CROSCEK — bukan kehadiran_karyawan
-    // ============================================================
     let croscekData = [];
     try {
-      croscekData = await fetchAllRows(
-        supabase
-          .from('croscek')
-          .select(
-            '"id_karyawan", "Kode_Shift", "Status_Kehadiran", "Status_Masuk", ' +
-            '"Jadwal_Masuk", "Jadwal_Pulang", "Actual_Masuk", "Actual_Pulang"'
-          )
-          .gte('"Tanggal"', dateStart)
-          .lte('"Tanggal"', dateEnd)
-      );
+      croscekData = await fetchAllRows(croscekQuery);
     } catch (err) {
-      console.error('[SUMMARY] Croscek query error:', err);
+      console.error('Summary croscek query error:', err);
       return res.status(500).json({ message: 'Error fetching summary data' });
     }
 
-    console.log(`[SUMMARY] Total records dari croscek: ${croscekData.length}`);
-    
-    // Count off-days
-    let offDayCount = 0;
-    croscekData.forEach(r => {
-      const kode = (r.Kode_Shift || '').toUpperCase().trim();
-      if (OFF_SHIFT.has(kode)) offDayCount++;
-    });
-    console.log(`[SUMMARY] Off-day records (will be skipped): ${offDayCount}`);
+    console.log(`[SUMMARY] filterType=${filterType} dateStart=${dateStart} dateEnd=${dateEnd} records=${croscekData.length}`);
 
     // ============================================================
-    // HITUNG METRICS
+    // Hitung metrics — konsisten dengan isLateArrival()
     // ============================================================
     const uniqueEmployees = new Set();
     let checkIns  = 0;
@@ -238,10 +244,11 @@ export async function getSummary(req, res) {
 
       if (empId) uniqueEmployees.add(empId);
 
+      // Hitung check-in / check-out dari actual scan
       if (record.Actual_Masuk)  checkIns++;
       if (record.Actual_Pulang) checkOuts++;
 
-      // Skip off-day untuk work_summary
+      // Skip off-day untuk work summary
       if (isOff) return;
 
       if (status !== 'HADIR') {
@@ -254,16 +261,9 @@ export async function getSummary(req, res) {
         absent++;
         return;
       }
-      // // Check for partial data (only one of masuk/pulang exists)
-      // if (!record.Actual_Masuk || !record.Actual_Pulang) {
-      //   // Will be rejected by isActualKosongHadir anyway, but count as absent
-      //   absent++;
-      //   return;
-      // }
 
-      // isLateArrival sudah terdefinisi di atas file
-      const isLate = isLateArrival(record);
-      if (isLate) {
+      // Pakai isLateArrival() — sama persis dengan top-latecomers
+      if (isLateArrival(record)) {
         late++;
       } else {
         present++;
@@ -273,7 +273,9 @@ export async function getSummary(req, res) {
     const totalWork = present + late + absent;
 
     // ============================================================
-    // TREND — hanya untuk filter "today"
+    // Trend: bandingkan dengan periode sebelumnya
+    // Hanya relevan untuk filter "today"
+    // Untuk bulan/range → kirim null agar frontend bisa sembunyikan badge
     // ============================================================
     let trendEmployees = null;
     let trendCheckIns  = null;
@@ -282,30 +284,27 @@ export async function getSummary(req, res) {
     if (filterType === 'today') {
       const yesterday = new Date();
       yesterday.setDate(yesterday.getDate() - 1);
-      const yStr = formatDateLocal(yesterday);
+      const yStr = formatDateLocalSummary(yesterday);
 
       try {
-        const prevData = await fetchAllRows(
-          supabase
-            .from('croscek')
-            .select('"id_karyawan", "Actual_Masuk", "Actual_Pulang"')
-            .gte('"Tanggal"', yStr)
-            .lte('"Tanggal"', yStr)
-        );
-        const prevEmp  = new Set(prevData.map(r => r.id_karyawan).filter(Boolean)).size;
-        const prevCI   = prevData.filter(r => r.Actual_Masuk).length;
-        const prevCO   = prevData.filter(r => r.Actual_Pulang).length;
+        const prevQuery = supabase
+          .from('croscek')
+          .select('"id_karyawan", "Actual_Masuk", "Actual_Pulang"')
+          .gte('"Tanggal"', yStr)
+          .lte('"Tanggal"', yStr);
+
+        const prevData = await fetchAllRows(prevQuery);
+        const prevEmp      = new Set(prevData.map(r => r.id_karyawan).filter(Boolean)).size;
+        const prevCheckIns = prevData.filter(r => r.Actual_Masuk).length;
+        const prevCheckOut = prevData.filter(r => r.Actual_Pulang).length;
 
         trendEmployees = uniqueEmployees.size - prevEmp;
-        trendCheckIns  = checkIns - prevCI;
-        trendCheckOuts = checkOuts - prevCO;
+        trendCheckIns  = checkIns  - prevCheckIns;
+        trendCheckOuts = checkOuts - prevCheckOut;
       } catch (err) {
-        console.warn('[SUMMARY] Trend fetch failed:', err.message);
+        console.warn('[SUMMARY] Could not fetch yesterday for trend:', err.message);
       }
     }
-
-    console.log(`[SUMMARY] present=${present} late=${late} absent=${absent} total=${totalWork}`);
-    console.log(`[SUMMARY] DateRange: ${dateStart} to ${dateEnd}, Filter: ${filterType}`);
 
     res.json({
       total_records:    croscekData.length,
@@ -321,16 +320,173 @@ export async function getSummary(req, res) {
         late_rate:    totalWork > 0 ? Math.round((late    / totalWork) * 100) : 0,
         absent_rate:  totalWork > 0 ? Math.round((absent  / totalWork) * 100) : 0,
       },
+      // null = jangan tampilkan trend badge di frontend
       trends: {
-        employees:  trendEmployees,
+        employees: trendEmployees,
         check_ins:  trendCheckIns,
         check_outs: trendCheckOuts,
       },
       period: { start: dateStart, end: dateEnd, type: filterType }
     });
   } catch (error) {
-    console.error('[SUMMARY] Server error:', error);
+    console.error('Summary error:', error);
     res.status(500).json({ message: 'Server error fetching summary' });
+  }
+}
+
+/**
+ * GET /api/analytics/attendance-rate
+ * KPI Row 2: % Kehadiran, % Terlambat, % Absen
+ *
+ * Rule (konsisten dengan getEmployeeDetail):
+ * - Skip  : status 'pending' (belum waktunya — tanggal future atau jam < jadwal masuk hari ini)
+ * - Skip  : offday (Kode_Shift: X, CT, CTT, CTB, EO, OF1)
+ * - Late  : isLateArrival() → HADIR + >4 menit telat + kompensasi pulang belum terpenuhi
+ * - Present: HADIR, bukan late, ada actual scan (masuk atau pulang)
+ * - Absent : Status_Kehadiran bukan HADIR (TIDAK HADIR, ALPA, SAKIT, IZIN, CUTI, dll)
+ *            DAN bukan offday
+ *
+ * PENTING: Untuk filter 'today', record yang belum punya Actual_Pulang
+ * tapi sudah punya Actual_Masuk → TETAP dihitung (masih jam kerja).
+ */
+export async function getAttendanceRate(req, res) {
+  try {
+    const { filterType = 'today', startDate, endDate, month } = req.query;
+
+    let dateStart, dateEnd;
+
+    if (filterType === 'month' && month) {
+      const [year, monthNum] = month.split('-');
+      dateStart = new Date(parseInt(year), parseInt(monthNum) - 1, 1);
+      dateEnd   = new Date(parseInt(year), parseInt(monthNum), 0);
+    } else if (filterType === 'range' && startDate && endDate) {
+      dateStart = new Date(startDate);
+      dateEnd   = new Date(endDate);
+    } else {
+      dateStart = new Date();
+      dateEnd   = new Date();
+    }
+
+    const dsStr = formatDateLocal(dateStart);
+    const deStr = formatDateLocal(dateEnd);
+
+    // ── Fetch semua data croscek periode ini ───────────────────────
+    const croscekRows = await fetchAllRows(
+      supabase
+        .from('croscek')
+        .select('*')
+        .gte('"Tanggal"', dsStr)
+        .lte('"Tanggal"', deStr)
+    );
+
+    // ── Helpers (reuse dari scope file) ───────────────────────────
+    const OFF_CODES = new Set(['X', 'CT', 'CTT', 'CTB', 'EO', 'OF1']);
+
+    // Waktu Jakarta sekarang
+    const nowJkt = new Date(
+      new Date().toLocaleString('en-US', { timeZone: 'Asia/Jakarta' })
+    );
+    const todayJkt       = formatDateLocal(nowJkt);
+    const nowMinJkt      = nowJkt.getHours() * 60 + nowJkt.getMinutes();
+
+    const normDate = (v) => String(v || '').split('T')[0].split(' ')[0];
+
+    /**
+     * isBelumWaktunya:
+     * - Tanggal masa depan → true
+     * - Tanggal lampau    → false (sudah waktunya, scan kosong = absen)
+     * - Tanggal hari ini  → true hanya jika belum ada scan DAN jam < jadwal masuk
+     */
+    const isBelumWaktunya = (record) => {
+      // Sudah ada scan → pasti sudah waktunya
+      if (record.Actual_Masuk || record.Actual_Pulang) return false;
+
+      const dateOnly = normDate(record.Tanggal);
+
+      // Masa depan
+      if (dateOnly > todayJkt) return true;
+
+      // Lampau tanpa scan → absen, bukan "belum waktunya"
+      if (dateOnly < todayJkt) return false;
+
+      // Hari ini, belum ada scan → cek jadwal masuk
+      const jadwalMin = toMinutes(record.Jadwal_Masuk);
+      if (jadwalMin === null) return false;
+      return nowMinJkt < jadwalMin;
+    };
+
+    // ── Hitung ────────────────────────────────────────────────────
+    let present = 0;
+    let late    = 0;
+    let absent  = 0;
+    const uniqueEmps = new Set();
+
+    croscekRows.forEach((record) => {
+      // 1. Skip pending
+      if (isBelumWaktunya(record)) return;
+
+      // 2. Skip offday
+      const kode = (record.Kode_Shift || '').toUpperCase().trim();
+      if (OFF_CODES.has(kode)) return;
+
+      // Track unique employee
+      uniqueEmps.add(record.id_karyawan ?? record.Nama);
+
+      const statusKehadiran = String(record.Status_Kehadiran || '').toUpperCase().trim();
+
+      // 3. Bukan HADIR → absent (TIDAK HADIR, ALPA, SAKIT, IZIN, CUTI, dll)
+      if (statusKehadiran !== 'HADIR') {
+        absent++;
+        return;
+      }
+
+      // 4. Status HADIR tapi tidak ada scan sama sekali:
+      //    - Hari lampau  → absent
+      //    - Hari ini     → skip (mungkin belum pulang, bukan belum hadir)
+      const hasAnyScan =
+        record.Actual_Masuk  || record.Actual_Pulang ||
+        record.Prediksi_Actual_Masuk || record.Prediksi_Actual_Pulang;
+
+      if (!hasAnyScan) {
+        const dateOnly = normDate(record.Tanggal);
+        if (dateOnly < todayJkt) {
+          absent++;
+        }
+        // Hari ini tanpa scan tapi status HADIR → skip (pending state)
+        return;
+      }
+
+      // 5. Terlambat: gunakan isLateArrival() yang sama dengan employee detail
+      if (isLateArrival(record)) {
+        late++;
+      } else {
+        present++;
+      }
+    });
+
+    const total       = present + late + absent;
+    const presentRate = total > 0 ? Math.round((present / total) * 100) : 0;
+    const lateRate    = total > 0 ? Math.round((late    / total) * 100) : 0;
+    const absentRate  = total > 0 ? Math.round((absent  / total) * 100) : 0;
+
+    console.log('[ATTENDANCE RATE]', { dsStr, deStr, present, late, absent, total });
+
+    res.json({
+      period: { start: dsStr, end: deStr, type: filterType },
+      total_records: total,
+      unique_employees: uniqueEmps.size,
+      attendance: {
+        present,
+        present_rate: presentRate,
+        late,
+        late_rate:    lateRate,
+        absent,
+        absent_rate:  absentRate,
+      },
+    });
+  } catch (error) {
+    console.error('[ATTENDANCE RATE] Server error:', error);
+    res.status(500).json({ message: 'Server error fetching attendance rate' });
   }
 }
 
@@ -560,35 +716,6 @@ export async function getDailyDetail(req, res) {
     res.status(500).json({ message: 'Server error fetching daily detail' });
   }
 }
-/**
- * Helper: Detect check-in from Actual_Masuk or Prediksi_Actual_Masuk
- */
-// function getCheckInTime(record) {
-//   if (record.Actual_Masuk) return record.Actual_Masuk;
-//   if (record.Prediksi_Actual_Masuk) return record.Prediksi_Actual_Masuk;
-//   return null;
-// }
-
-/**
- * Helper: Detect check-out from Actual_Pulang or Prediksi_Actual_Pulang
- * Rule: If Prediksi_Actual_Masuk === Prediksi_Actual_Pulang, don't count as check-out
- */
-// function getCheckOutTime(record) {
-//   // If prediksi masuk dan pulang sama, jangan hitung sebagai checkout
-//   if (record.Prediksi_Actual_Masuk && record.Prediksi_Actual_Pulang) {
-//     if (record.Prediksi_Actual_Masuk === record.Prediksi_Actual_Pulang) {
-//       return null;
-//     }
-//   }
-  
-//   // Use Actual_Pulang if available
-//   if (record.Actual_Pulang) return record.Actual_Pulang;
-  
-//   // Fallback to Prediksi_Actual_Pulang if Actual_Pulang is null
-//   if (record.Prediksi_Actual_Pulang) return record.Prediksi_Actual_Pulang;
-  
-//   return null;
-// }
 
 /**
  * GET /api/analytics/croscek-daily-trend
@@ -837,137 +964,6 @@ export async function getCroscekSummary(req, res) {
 }
 
 /**
- * Helper: Determine indicator status based on croscek status
- * Rule: Hijau (valid) if Status_Kehadiran is "Hadir" or has green indicator
- * Orange (warning) if Status_Kehadiran shows terlambat/absence or has orange indicator
- */
-/**
- * Helper: Determine check-in indicator (Masuk)
- * Rule: Hijau (on-time) vs Orange (late)
- */
-// function getDelayIndicator(record) {
-//   const status = (record.Status_Kehadiran || '').toLowerCase();
-  
-//   // Orange indicators (late, warning) - CHECK THESE FIRST before 'masuk' or 'hadir'
-//   // Because "Masuk Terlambat" contains 'masuk' but should be orange, not green!
-//   if (status.includes('terlambat') || status.includes('late')) {
-//     return 'orange';
-//   }
-  
-//   if (status.includes('sakit') || status.includes('izin') || status.includes('cuti')) {
-//     return 'orange';
-//   }
-  
-//   // Green indicators (on-time, valid) - check these AFTER orange/late checks
-//   if (status.includes('hadir') || status.includes('masuk') || status.includes('valid')) {
-//     return 'green';
-//   }
-  
-//   // Check actual vs schedule
-//   const actualMasuk = record.Actual_Masuk;
-//   const scheduleMasuk = record.Jadwal_Masuk;
-  
-//   if (actualMasuk && scheduleMasuk) {
-//     // If actual after schedule = orange (late)
-//     return 'orange';
-//   }
-  
-//   // If prediction exists, prioritize actual, then prediction
-//   if (record.Prediksi_Actual_Masuk) {
-//     return 'orange'; // prediction means validation needed
-//   }
-  
-//   return 'green'; // default to green
-// }
-
-/**
- * Helper: Parse time string "HH:MM" or "HH:MM:SS" or datetime â†’ total minutes
- * Returns null if invalid
- */
-// function toMinutes(t) {
-//   if (!t) return null;
-//   const str = String(t).trim();
-  
-//   // Extract HH:MM or HH:MM:SS
-//   const match = str.match(/(\d{1,2}):(\d{2}):?(\d{2})?/);
-//   if (!match) return null;
-  
-//   const hh = parseInt(match[1]);
-//   const mm = parseInt(match[2]);
-//   const ss = parseInt(match[3]) || 0;
-  
-//   return hh * 60 + mm + (ss > 0 ? 1 : 0); // round up seconds
-// }
-
-/**
- * Helper: Normalize selisih lintas hari (for overnight shifts)
- */
-// function normalizeDayDiff(diff) {
-//   let d = diff;
-//   if (d > 720) d -= 1440;
-//   if (d < -720) d += 1440;
-//   return d;
-// }
-
-/**
- * Helper: Get fallback schedule by shift code.
- * Used only if Jadwal_Masuk/Jadwal_Pulang in row are empty.
- */
-// function getScheduleByShiftCode(shiftCode) {
-//   const scheduleMap = {
-//     '1': { masuk: 390, pulang: 930 },      // 06:30 - 15:30
-//     '1A': { masuk: 390, pulang: 930 },     // 06:30 - 15:30
-//     'E1': { masuk: 390, pulang: 930 },     // 06:30 - 15:30
-//     'E2': { masuk: 660, pulang: 1140 },    // 11:00 - 19:00
-//     'E3': { masuk: 390, pulang: 930 },     // 06:30 - 15:30
-//     'OFF': { masuk: 0, pulang: 0 },
-//     'CT': { masuk: 390, pulang: 930 },     // 06:30 - 15:30
-//   };
-  
-//   const code = (shiftCode || '').trim().toUpperCase();
-//   return scheduleMap[code] || { masuk: 390, pulang: 930 }; // default 06:30-15:30
-// }
-
-/**
- * Helper: Resolve effective schedule minutes.
- * Priority: Jadwal_Masuk/Jadwal_Pulang from croscek row, fallback to shift mapping.
- */
-// function getEffectiveScheduleMinutes(row) {
-//   const byShift = getScheduleByShiftCode(row.Kode_Shift);
-//   const jadwalMasuk = toMinutes(row.Jadwal_Masuk);
-//   const jadwalPulang = toMinutes(row.Jadwal_Pulang);
-
-//   return {
-//     masuk: jadwalMasuk ?? byShift.masuk,
-//     pulang: jadwalPulang ?? byShift.pulang
-//   };
-// }
-
-/**
- * Helper: Calculate actual check-in time minus scheduled check-in time (in minutes)
- * Positive = late, Negative = early
- */
-// function getSelisihMasukMenit(row) {
-//   const actualMasukMin = toMinutes(row.Actual_Masuk);
-//   if (actualMasukMin === null) return null;
-
-//   const schedule = getEffectiveScheduleMinutes(row);
-//   return normalizeDayDiff(actualMasukMin - schedule.masuk);
-// }
-
-/**
- * Helper: Calculate actual check-out time minus scheduled check-out time (in minutes)
- * Positive = later checkout, Negative = early checkout
- */
-// function getSelisihPulangMenit(row) {
-//   const actualPulangMin = toMinutes(row.Actual_Pulang);
-//   if (actualPulangMin === null) return null;
-
-//   const schedule = getEffectiveScheduleMinutes(row);
-//   return normalizeDayDiff(actualPulangMin - schedule.pulang);
-// }
-
-/**
  * Helper: Get late minutes (hanya positif)
  * Jika selisih < 0 (masuk lebih awal), return 0
  */
@@ -996,105 +992,6 @@ function isTidakHadir(row) {
   const status = (row.Status_Kehadiran || '').toUpperCase();
   return ['TIDAK HADIR', 'ALPA', 'SAKIT', 'IZIN', 'DINAS LUAR'].includes(status);
 }
-
-/**
- * Helper: Detect keterlambatan dari Status_Masuk field (PRIORITAS)
- * Returns: boolean - true jika termasuk kategori terlambat
- * 
- * Menggunakan STRICT pattern matching sama seperti Croscek.jsx
- * Format TL: "TL 1-5", "TL 5-10", "TL 10", "TL 1 5", "TL 5 10", dll
- */
-// function isTerlambatByStatusMasuk(statusMasuk) {
-//   if (!statusMasuk) return false;
-//   const st = String(statusMasuk).toUpperCase().trim();
-
-//   // Explicit text markers used in legacy/manual status values.
-//   if (st.includes('TELAT') || st.includes('TERLAMBAT')) return true;
-
-//   // Strict TL code parser: TL + number, with optional range (space or dash).
-//   // Example: TL 1 5, TL 5-10, TL10
-//   const tlPattern = /\bTL\b\s*(\d+)(?:\s*[-–]?\s*(\d+))?/i;
-//   return tlPattern.test(st);
-// }
-
-/**
- * Helper: HADIR tapi salah satu actual scan kosong => kategori kuning (bukan telat).
- */
-// function isActualKosongHadir(row) {
-//   const status = String(row.Status_Kehadiran || '').toUpperCase().trim();
-//   if (status !== 'HADIR') return false;
-//   return !row.Actual_Masuk || !row.Actual_Pulang;
-// }
-
-
-/**
- * Helper: Determine if this is a legitimate late arrival
- * RULES (sama dengan exportRekapKehadiran di Croscek.jsx):
- * 1. PRIORITAS: Check Status_Masuk field - jika ada TL code, maka terlambat
- * 2. FALLBACK: Check actual check-in time vs scheduled time
- * 
- * Requirements:
- * - Must have "Hadir" status
- * - Must have actual check-in time
- * - Check-in time must be after scheduled time (only used as fallback)
- */
-// function isLateArrival(row) {
-//   // Must have "Hadir" status
-//   const status = String(row.Status_Kehadiran || '').toUpperCase().trim();
-//   if (status !== 'HADIR') return false;
-
-//   // Kategori kuning (scan kosong) bukan terlambat.
-//   if (isActualKosongHadir(row)) return false;
-
-//   const selisihMasuk = getSelisihMasukMenit(row);
-//   const selisihPulang = getSelisihPulangMenit(row);
-
-//   // Jika waktu bisa dihitung, ikuti rule indikator:
-//   // - >120 menit = ungu (bukan bucket telat dashboard)
-//   // - telat <=0 = tidak telat
-//   // - telat positif tapi kompensasi pulang terpenuhi = hijau
-//   if (selisihMasuk !== null) {
-//     if (Math.abs(selisihMasuk) > 120) return false;
-
-//     const telatMin = Math.max(0, selisihMasuk);
-//     if (telatMin <= 4) return false;
-
-//     const kompensasiPulangMenit = Math.ceil(telatMin / 60) * 60;
-//     if (selisihPulang !== null && selisihPulang >= kompensasiPulangMenit) {
-//       return false;
-//     }
-
-//     return true;
-//   }
-
-//   // Fallback status text hanya jika perhitungan waktu tidak tersedia.
-//   // Untuk kasus ini, ikuti marker status dari data croscek.
-//   return isTerlambatByStatusMasuk(row.Status_Masuk);
-// }
-
-/**
- * Helper: Determine check-out indicator
- * Rule: Hijau (on-time/valid) vs Anomali (too early/tidak sesuai rule hijau)
- */
-// function getCheckOutIndicator(record) {
-//   const statusPulang = (record.Status_Pulang || '').toLowerCase();
-//   const statusKehadiran = (record.Status_Kehadiran || '').toLowerCase();
-  
-//   // Green indicators (on-time, valid)
-//   if (statusPulang.includes('pulang') && statusPulang.includes('tepat')) {
-//     return 'green';
-//   }
-//   if (statusPulang.includes('valid')) {
-//     return 'green';
-//   }
-//   if (statusKehadiran.includes('hadir')) {
-//     return 'green';
-//   }
-  
-//   // If we reach here, it means the checkout status doesn't match green rule
-//   // This indicates anomaly - too early or irregular checkout
-//   return 'anomaly'; // represents too early or doesn't match expected pattern
-// }
 
 /**
  * GET /api/analytics/croscek-delays
@@ -1253,86 +1150,86 @@ export async function getCroscekDelays(req, res) {
  * FIX: Use same isLateArrival() logic as getTopLatecomers to correctly identify late arrivals
  * instead of just checking if Status_Kehadiran contains 'terlambat'
  */
-export async function getAttendanceRate(req, res) {
-  try {
-    const { filterType = 'today', startDate, endDate, month } = req.query;
+// export async function getAttendanceRate(req, res) {
+//   try {
+//     const { filterType = 'today', startDate, endDate, month } = req.query;
     
-    let dateStart, dateEnd;
+//     let dateStart, dateEnd;
 
-    if (filterType === 'month' && month) {
-      const [year, monthNum] = month.split('-');
-      dateStart = new Date(year, monthNum - 1, 1).toISOString().split('T')[0];
-      dateEnd = new Date(year, monthNum, 0).toISOString().split('T')[0];
-    } else if (filterType === 'range' && startDate && endDate) {
-      dateStart = new Date(startDate).toISOString().split('T')[0];
-      dateEnd = new Date(endDate).toISOString().split('T')[0];
-    } else {
-      // Today (default)
-      dateStart = new Date().toISOString().split('T')[0];
-      dateEnd = dateStart;
-    }
+//     if (filterType === 'month' && month) {
+//       const [year, monthNum] = month.split('-');
+//       dateStart = new Date(year, monthNum - 1, 1).toISOString().split('T')[0];
+//       dateEnd = new Date(year, monthNum, 0).toISOString().split('T')[0];
+//     } else if (filterType === 'range' && startDate && endDate) {
+//       dateStart = new Date(startDate).toISOString().split('T')[0];
+//       dateEnd = new Date(endDate).toISOString().split('T')[0];
+//     } else {
+//       // Today (default)
+//       dateStart = new Date().toISOString().split('T')[0];
+//       dateEnd = dateStart;
+//     }
 
-    // Fetch from croscek table (processed attendance data)
-    // Need to fetch ALL fields to use isLateArrival() function properly
-    let query = supabase
-      .from('croscek')
-      .select('*')
-      .gte('"Tanggal"', dateStart)
-      .lte('"Tanggal"', dateEnd);
+//     // Fetch from croscek table (processed attendance data)
+//     // Need to fetch ALL fields to use isLateArrival() function properly
+//     let query = supabase
+//       .from('croscek')
+//       .select('*')
+//       .gte('"Tanggal"', dateStart)
+//       .lte('"Tanggal"', dateEnd);
 
-    let croscekData = await fetchAllRows(query);
+//     let croscekData = await fetchAllRows(query);
 
-    // Count by status using same logic as getTopLatecomers
-    let present = 0;
-    let late = 0;
-    let absent = 0;
-    const uniqueEmployees = new Set();
+//     // Count by status using same logic as getTopLatecomers
+//     let present = 0;
+//     let late = 0;
+//     let absent = 0;
+//     const uniqueEmployees = new Set();
 
-    croscekData.forEach(record => {
-      const status = (record.Status_Kehadiran || '').toUpperCase().trim();
+//     croscekData.forEach(record => {
+//       const status = (record.Status_Kehadiran || '').toUpperCase().trim();
       
-      uniqueEmployees.add(record.Nama);
+//       uniqueEmployees.add(record.Nama);
       
-      // Use isLateArrival() function to properly detect late arrivals
-      // This function checks:
-      // 1. Status_Masuk field for TL code (priority)
-      // 2. Actual vs scheduled check-in time (fallback)
-      if (isLateArrival(record)) {
-        late++;
-      } else if (status === 'HADIR') {
-        present++;
-      } else if (status.includes('SAKIT') || status.includes('IZIN') || status.includes('CUTI') || status.includes('ALPA') || status.includes('TIDAK HADIR')) {
-        absent++;
-      }
-    });
+//       // Use isLateArrival() function to properly detect late arrivals
+//       // This function checks:
+//       // 1. Status_Masuk field for TL code (priority)
+//       // 2. Actual vs scheduled check-in time (fallback)
+//       if (isLateArrival(record)) {
+//         late++;
+//       } else if (status === 'HADIR') {
+//         present++;
+//       } else if (status.includes('SAKIT') || status.includes('IZIN') || status.includes('CUTI') || status.includes('ALPA') || status.includes('TIDAK HADIR')) {
+//         absent++;
+//       }
+//     });
 
-    const total = present + late + absent;
-    const presentRate = total > 0 ? Math.round((present / total) * 100) : 0;
-    const lateRate = total > 0 ? Math.round((late / total) * 100) : 0;
-    const absentRate = total > 0 ? Math.round((absent / total) * 100) : 0;
+//     const total = present + late + absent;
+//     const presentRate = total > 0 ? Math.round((present / total) * 100) : 0;
+//     const lateRate = total > 0 ? Math.round((late / total) * 100) : 0;
+//     const absentRate = total > 0 ? Math.round((absent / total) * 100) : 0;
 
-    res.json({
-      period: {
-        start: dateStart,
-        end: dateEnd,
-        type: filterType
-      },
-      total_records: total,
-      unique_employees: uniqueEmployees.size,
-      attendance: {
-        present: present,
-        present_rate: presentRate,
-        late: late,
-        late_rate: lateRate,
-        absent: absent,
-        absent_rate: absentRate
-      }
-    });
-  } catch (error) {
-    console.error('Attendance rate error:', error);
-    res.status(500).json({ message: 'Server error fetching attendance rate' });
-  }
-}
+//     res.json({
+//       period: {
+//         start: dateStart,
+//         end: dateEnd,
+//         type: filterType
+//       },
+//       total_records: total,
+//       unique_employees: uniqueEmployees.size,
+//       attendance: {
+//         present: present,
+//         present_rate: presentRate,
+//         late: late,
+//         late_rate: lateRate,
+//         absent: absent,
+//         absent_rate: absentRate
+//       }
+//     });
+//   } catch (error) {
+//     console.error('Attendance rate error:', error);
+//     res.status(500).json({ message: 'Server error fetching attendance rate' });
+//   }
+// }
 
 /**
  * GET /api/analytics/top-latecomers
@@ -1383,14 +1280,6 @@ export async function getTopLatecomers(req, res) {
 
     console.log('[TOP LATECOMERS] Total records fetched:', croscekData.length);
     
-    // Count off-days
-    let offDayCount = 0;
-    croscekData.forEach(r => {
-      const kode = (r.Kode_Shift || '').toUpperCase().trim();
-      if (['X', 'CT', 'CTT', 'CTB', 'EO', 'OF1'].includes(kode)) offDayCount++;
-    });
-    console.log('[TOP LATECOMERS] Off-day records (will be skipped):', offDayCount);
-    
     // Log first 20 sample records for debugging
     if (croscekData.length > 0) {
       console.log('[TOP LATECOMERS] Sample records (first 20):');
@@ -1409,13 +1298,7 @@ export async function getTopLatecomers(req, res) {
       const name = record.Nama || 'Unknown';
       const dept = record.Departemen || 'Unknown';
       const employeeKey = employeeId ? `id:${employeeId}` : `${name}__${dept}`;
-      const kode = (record.Kode_Shift || '').toUpperCase().trim();
       const statusKehadiran = String(record.Status_Kehadiran || '').toUpperCase().trim();
-      const OFF_SHIFT = new Set(['X', 'CT', 'CTT', 'CTB', 'EO', 'OF1']);
-      const isOff = OFF_SHIFT.has(kode);
-      
-      // Skip off-day (aligned with getSummary logic)
-      if (isOff) return;
       
       // Total hari kerja untuk ranking ini mengikuti baris HADIR.
       if (statusKehadiran !== 'HADIR') return;
@@ -1433,11 +1316,6 @@ export async function getTopLatecomers(req, res) {
       
       latecomers[employeeKey].total_records++;
       
-      // Status HADIR tapi tidak ada scan = skip (aligned with getSummary logic)
-      if (!record.Actual_Masuk && !record.Actual_Pulang) {
-        return;
-      }
-      
       // Rule telat mengikuti indikator rekap (hijau/orange/ungu/kuning handling).
       const isLate = isLateArrival(record);
       if (isLate) {
@@ -1453,7 +1331,6 @@ export async function getTopLatecomers(req, res) {
 
     console.log('[TOP LATECOMERS] Total terlambat records found:', terlambatCount);
     console.log('[TOP LATECOMERS] Unique employees with at least 1 late:', Object.values(latecomers).filter(e => e.late_count > 0).length);
-    console.log('[TOP LATECOMERS] DateRange: ' + dateStart + ' to ' + dateEnd + ', Filter: ' + filterType);
 
     // Calculate percentage and sort by late count
     const sorted = Object.values(latecomers)
@@ -1758,24 +1635,6 @@ export async function getDataQuality(req, res) {
  * Individual employee attendance history and trends
  * Query: ?month=2026-04&days=90
  */
-// // ============================================================
-// // HELPER: Format date ke "YYYY-MM-DD" tanpa timezone shift
-// // ============================================================
-// function formatDateLocal(date) {
-//   const y = date.getFullYear();
-//   const m = String(date.getMonth() + 1).padStart(2, '0');
-//   const d = String(date.getDate()).padStart(2, '0');
-//   return `${y}-${m}-${d}`;
-// }
-
-// // ============================================================
-// // Helper: Kode shift yang dianggap "hari libur/off" — tidak dihitung sebagai absen
-// // ============================================================
-// const OFF_SHIFT_CODES = new Set(['X', 'CT', 'CTT', 'CTB', 'EO', 'OF1']);
-
-// function isOffDay(kodeShift) {
-//   return OFF_SHIFT_CODES.has((kodeShift || '').toUpperCase().trim());
-// }
 
 export async function getEmployeeDetail(req, res) {
   try {
